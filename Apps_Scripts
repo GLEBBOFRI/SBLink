@@ -1,0 +1,390 @@
+const TOKEN = "вставь свой токен из фазербота";
+const ALLOWED_TELEGRAM_ID = узнай свой токен тг через бота любого;
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+    // 1. ПРОВЕРКА ДОСТУПА ПО TELEGRAM ID
+    let incomingChatId = null;
+    if (data.message) {
+      incomingChatId = data.message.chat.id;
+    } else if (data.callback_query) {
+      incomingChatId = data.callback_query.message.chat.id;
+    }
+
+    if (incomingChatId !== ALLOWED_TELEGRAM_ID) {
+      if (incomingChatId) {
+        sendTelegramMessage(incomingChatId, "Че ты лох ебанный пошел нахуй отсюда недохакер");
+      }
+      return; 
+    }
+
+    // 2. ОБРАБОТКА НАЖАТИЙ НА INLINE-КНОПКИ (Callback Query)
+    if (data.callback_query) {
+      const callback = data.callback_query;
+      const callbackData = callback.data;
+
+      // ЭТАП 1: Нажали "🗑 Удалить запись" в карточке предмета -> Показываем кнопки с номерами
+      if (callbackData.startsWith("mode_del_")) {
+        const subjectKey = callbackData.replace("mode_del_", "").trim().toLowerCase();
+        sendLinksForSubject(incomingChatId, subjectKey, true); // true = режим выбора для удаления
+        answerCallbackQuery(callback.id, "");
+        return;
+      }
+
+      // ЭТАП 2: Нажали на конкретный крестик "❌ N" -> Запрашиваем подтверждение Да/Нет
+      if (callbackData.startsWith("confirm_del_")) {
+        const parts = callbackData.split("_"); // confirm_del_предмет_индекс
+        const subjectKey = parts[2].toLowerCase();
+        const itemIndex = parts[3];
+
+        const textMessage = `⚠️ *Вы уверены, что хотите удалить запись №${itemIndex} по предмету ${subjectKey.toUpperCase()}?*`;
+        const inlineKeyboard = [
+          [
+            { text: "Да, удалить", callback_data: `do_del_${subjectKey}_${itemIndex}` },
+            { text: "Нет, отмена", callback_data: `cancel_del_${subjectKey}` }
+          ]
+        ];
+
+        sendTelegramMessageWithKeyboard(incomingChatId, textMessage, { inline_keyboard: inlineKeyboard });
+        answerCallbackQuery(callback.id, "");
+        return;
+      }
+
+      // ЭТАП 3А: Отмена удаления -> Возвращаем обычный вид предмета
+      if (callbackData.startsWith("cancel_del_")) {
+        const subjectKey = callbackData.replace("cancel_del_", "").trim().toLowerCase();
+        answerCallbackQuery(callback.id, "Удаление отменено");
+        sendLinksForSubject(incomingChatId, subjectKey, false);
+        return;
+      }
+
+      // ЭТАП 3Б: Нажали "✅ Да, удалить" -> Удаляем ячейку из таблицы со сдвигом
+      if (callbackData.startsWith("do_del_")) {
+        const parts = callbackData.split("_");
+        const subjectKey = parts[2].toLowerCase();
+        const itemIndex = parseInt(parts[3], 10);
+
+        let lastRow = sheet.getLastRow();
+        let targetRow = -1;
+
+        if (lastRow > 0) {
+          const firstCol = sheet.getRange(1, 1, lastRow, 1).getValues();
+          for (let i = 0; i < firstCol.length; i++) {
+            if (String(firstCol[i][0]).trim().toLowerCase() === subjectKey) {
+              targetRow = i + 1;
+              break;
+            }
+          }
+        }
+
+        if (targetRow !== -1) {
+          const lastCol = sheet.getLastColumn();
+          const rowValues = sheet.getRange(targetRow, 1, 1, Math.max(lastCol, 1)).getValues()[0];
+
+          let items = [];
+          for (let j = 1; j < rowValues.length; j++) {
+            if (rowValues[j] && String(rowValues[j]).trim() !== "") {
+              items.push(rowValues[j]);
+            }
+          }
+
+          if (itemIndex >= 1 && itemIndex <= items.length) {
+            items.splice(itemIndex - 1, 1); 
+
+            sheet.getRange(targetRow, 1, 1, sheet.getLastColumn() || 1).clearContent();
+
+            if (items.length > 0) {
+              sheet.getRange(targetRow, 1, 1, items.length + 1).setValues([[rowValues[0], ...items]]);
+            } else {
+              sheet.deleteRow(targetRow); 
+            }
+
+            answerCallbackQuery(callback.id, "Запись успешно удалена!");
+            sendLinksForSubject(incomingChatId, subjectKey, false);
+            return;
+          }
+        }
+
+        answerCallbackQuery(callback.id, "Ошибка: запись не найдена.");
+        return;
+      }
+
+      // Полное удаление предмета из меню "🗑 Удалить предмет"
+      if (callbackData.startsWith("del_subj_")) {
+        const subjectToDelete = callbackData.replace("del_subj_", "").trim().toLowerCase();
+        let lastRow = sheet.getLastRow();
+        let deleted = false;
+
+        if (lastRow > 0) {
+          const values = sheet.getRange(1, 1, lastRow, 1).getValues();
+          for (let i = 0; i < values.length; i++) {
+            if (String(values[i][0]).trim().toLowerCase() === subjectToDelete) {
+              sheet.deleteRow(i + 1);
+              deleted = true;
+              break;
+            }
+          }
+        }
+
+        answerCallbackQuery(callback.id, deleted ? "Предмет удален!" : "Предмет не найден.");
+        if (deleted) {
+          sendTelegramMessage(incomingChatId, `🗑 Предмет *${subjectToDelete.toUpperCase()}* полностью удален.`);
+        }
+        return;
+      }
+
+       Вывод ссылок при клике на предмет из общего меню
+      sendLinksForSubject(incomingChatId, callbackData, false);
+      answerCallbackQuery(callback.id, "");
+      return;
+    }
+
+     3. ОБРАБОТКА ОБЫЧНЫХ СООБЩЕНИЙ
+    if (!data.message || !data.message.text) return;
+
+    const text = data.message.text.trim();
+
+     /start и Главное меню
+    if (text === "/start") {
+      sendMainMenu(incomingChatId, "Уебок выбери предмет из меню или отправь новую запись в формате:\n`предмет описание ссылка`, оправишь иначе, тоби пизда");
+      return;
+    }
+
+     Кнопка «📚 Предметы»
+    if (text === "📚 Ебанные предметы") {
+      sendSubjectsList(incomingChatId, false);
+      return;
+    }
+
+     Кнопка «🗑 Удалить предмет»
+    if (text === "🗑 Удалить нахуй все") {
+      sendSubjectsList(incomingChatId, true);
+      return;
+    }
+
+    const parts = text.split(" ");
+
+     Сценарий 1: Пользователь ввел только название предмета (например, "ак")
+    if (parts.length === 1) {
+      sendLinksForSubject(incomingChatId, parts[0], false);
+      return;
+    }
+
+     Сценарий 2: Добавление ссылки (формат: предмет описание ссылка)
+    const possibleLink = parts[parts.length - 1];
+    if (possibleLink.startsWith("http:") || possibleLink.startsWith("https:")) {
+      const key = parts[0].trim();
+      const description = parts.slice(1, parts.length - 1).join(" ");
+      const linkText = description ? `${description}: ${possibleLink}` : possibleLink;
+
+      let lastRow = sheet.getLastRow();
+      let targetRowIndex = -1;
+
+      if (lastRow > 0) {
+        const firstColumnValues = sheet.getRange(1, 1, lastRow, 1).getValues();
+        for (let i = 0; i < firstColumnValues.length; i++) {
+          if (String(firstColumnValues[i][0]).trim().toLowerCase() === key.toLowerCase()) {
+            targetRowIndex = i + 1;
+            break;
+          }
+        }
+      }
+
+      if (targetRowIndex !== -1) {
+        const lastCol = sheet.getLastColumn();
+        const rowValues = sheet.getRange(targetRowIndex, 1, 1, Math.max(lastCol, 1)).getValues()[0];
+        let targetCol = -1;
+
+        for (let j = 1; j < rowValues.length; j++) {
+          if (!rowValues[j] || String(rowValues[j]).trim() === "") {
+            targetCol = j + 1;
+            break;
+          }
+        }
+
+        if (targetCol === -1) {
+          targetCol = rowValues.length + 1;
+        }
+
+        sheet.getRange(targetRowIndex, targetCol).setValue(linkText);
+      } else {
+        sheet.appendRow([key, linkText]);
+      }
+
+      sendTelegramMessage(incomingChatId, `✅ Сохранено для *${key}*:\n${linkText}`);
+    } else {
+      sendTelegramMessage(incomingChatId, "Я тебя сука предупреждал, ну все, тоби пизда. Удаляю все записи и самоликвидируюсь...");
+      Utilities.sleep(3000);
+      sendTelegramMessage(incomingChatId, "3...");
+      Utilities.sleep(1000);
+      sendTelegramMessage(incomingChatId, "2...");
+      Utilities.sleep(1000);
+      sendTelegramMessage(incomingChatId, "1...");
+      Utilities.sleep(2000);
+      sendTelegramMessage(incomingChatId, "ахахахаахх наебал");
+    }
+
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+ Вывод ссылок предмета (showDeleteMode = true включит выбор номеров для удаления)
+function sendLinksForSubject(chatId, subjectKey, showDeleteMode) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const queryKey = subjectKey.trim().toLowerCase();
+  let foundLinks = [];
+
+  if (lastRow > 0 && lastCol > 0) {
+    const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0]).trim().toLowerCase() === queryKey) {
+        for (let j = 1; j < data[i].length; j++) {
+          if (data[i][j] && String(data[i][j]).trim() !== "") {
+            foundLinks.push(data[i][j]);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (foundLinks.length > 0) {
+    let textMessage = `📚 Ссылки по предмету *${subjectKey.toUpperCase()}*:\n\n` + 
+                      foundLinks.map((l, idx) => `*${idx + 1}.* ${l}`).join("\n");
+    
+    let inlineKeyboard = [];
+
+    if (!showDeleteMode) {
+      // Обычный режим: Показываем только одну кнопку "🗑 Удалить запись"
+      inlineKeyboard.push([
+        { text: "🗑 Удалить лишь одну запись", callback_data: `mode_del_${queryKey}` }
+      ]);
+    } else {
+      // Режим удаления: Показываем инструкцию, крестики по 4 в ряд и кнопку отмены
+      textMessage += "\n\n👇 *Выберите номер записи для удаления:*";
+
+      let deleteButtonsRow = [];
+      for (let idx = 0; idx < foundLinks.length; idx++) {
+        deleteButtonsRow.push({
+          text: `❌ ${idx + 1}`,
+          callback_data: `confirm_del_${queryKey}_${idx + 1}`
+        });
+
+        if (deleteButtonsRow.length === 4 || idx === foundLinks.length - 1) {
+          inlineKeyboard.push(deleteButtonsRow);
+          deleteButtonsRow = [];
+        }
+      }
+
+      inlineKeyboard.push([
+        { text: "↩️ Отмена", callback_data: `cancel_del_${queryKey}` }
+      ]);
+    }
+
+    sendTelegramMessageWithKeyboard(chatId, textMessage, { inline_keyboard: inlineKeyboard });
+  } else {
+    sendTelegramMessage(chatId, `По предмету "${subjectKey}" ничего не найдено.`);
+  }
+}
+
+// Главное меню снизу
+function sendMainMenu(chatId, text) {
+  const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "Markdown",
+    reply_markup: {
+      keyboard: [
+        [{ text: "📚 Ебанные предметы" }, { text: "🗑 Удалить нахуй все" }]
+      ],
+      resize_keyboard: true,
+      is_persistent: true
+    }
+  };
+  
+  UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", payload: JSON.stringify(payload) });
+}
+
+// Вывод списка предметов
+function sendSubjectsList(chatId, isDeleteMode) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  let subjects = [];
+
+  if (lastRow > 0) {
+    const firstColumnValues = sheet.getRange(1, 1, lastRow, 1).getValues();
+    for (let i = 0; i < firstColumnValues.length; i++) {
+      let val = String(firstColumnValues[i][0]).trim();
+      if (val !== "") {
+        subjects.push(val);
+      }
+    }
+  }
+
+  if (subjects.length === 0) {
+    sendTelegramMessage(chatId, "В таблице пока нет предметов.");
+    return;
+  }
+
+  let inlineKeyboard = [];
+  
+  if (isDeleteMode) {
+    for (let i = 0; i < subjects.length; i++) {
+      inlineKeyboard.push([{
+        text: `❌ Удалить целиком ${subjects[i]}`,
+        callback_data: `del_subj_${subjects[i]}`
+      }]);
+    }
+  } else {
+    for (let i = 0; i < subjects.length; i += 2) {
+      let row = [{ text: subjects[i], callback_data: subjects[i] }];
+      if (subjects[i + 1]) {
+        row.push({ text: subjects[i + 1], callback_data: subjects[i + 1] });
+      }
+      inlineKeyboard.push(row);
+    }
+  }
+
+  const titleText = isDeleteMode 
+    ? "🗑 *Выберите предмет для ПОЛНОГО удаления:*" 
+    : "📚 *Список предметов:*\nНажмите на предмет, чтобы получить ссылки:";
+
+  sendTelegramMessageWithKeyboard(chatId, titleText, { inline_keyboard: inlineKeyboard });
+}
+
+function sendTelegramMessage(chatId, text) {
+  sendTelegramMessageWithKeyboard(chatId, text, null);
+}
+
+function sendTelegramMessageWithKeyboard(chatId, text, replyMarkup) {
+  const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: "Markdown",
+    disable_web_page_preview: true
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+  
+  UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", payload: JSON.stringify(payload) });
+}
+
+function answerCallbackQuery(callbackQueryId, text) {
+  const url = `https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`;
+  const payload = {
+    callback_query_id: callbackQueryId,
+    text: text
+  };
+  
+  UrlFetchApp.fetch(url, { method: "post", contentType: "application/json", payload: JSON.stringify(payload) });
+}
